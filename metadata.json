@@ -1,0 +1,7 @@
+{
+  "name": "Mathcounts Club HQ",
+  "description": "A comprehensive platform for middle school Mathcounts clubs, featuring AI-powered problem generation, performance tracking, and mock competition rounds for students and coaches.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
