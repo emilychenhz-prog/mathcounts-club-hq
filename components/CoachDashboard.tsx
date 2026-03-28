@@ -1,8 +1,8 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { StudentStats, MathLevel, AssessmentColumn } from '../types';
-import { 
-  UserPlusIcon, 
+import {
+  UserPlusIcon,
   XMarkIcon,
   InformationCircleIcon,
   PlusIcon,
@@ -16,6 +16,8 @@ import {
   ChartBarIcon,
   StarIcon
 } from '@heroicons/react/24/outline';
+import { db } from '../services/firebase';
+import { collection, doc, getDocs, getDoc, setDoc, addDoc, updateDoc, deleteDoc, writeBatch, deleteField } from 'firebase/firestore';
 
 const MOCK_NAMES = [
   "Alex Rivera", "Samantha Wu", "Jordan Lee", "Casey Smith", "Emma Chen",
@@ -42,7 +44,7 @@ const generateMockStudents = (): StudentStats[] => {
     const [first, last] = fullName.split(' ');
     const id = (i + 1).toString();
     const dynamicScores: Record<string, number> = {};
-    
+
     // Random quiz scores (10-30)
     for (let j = 1; j <= 6; j++) {
       dynamicScores[`q${j}`] = Math.floor(Math.random() * 21) + 10;
@@ -61,8 +63,6 @@ const generateMockStudents = (): StudentStats[] => {
       gender: ['Male', 'Female', 'Other'][Math.floor(Math.random() * 3)],
       tryoutScore: Math.floor(Math.random() * 31) + 15,
       problemsSolved: Math.floor(Math.random() * 300),
-      averageSprintScore: 0,
-      averageTargetScore: 0,
       badges: [],
       dynamicScores
     };
@@ -70,26 +70,19 @@ const generateMockStudents = (): StudentStats[] => {
 };
 
 const CoachDashboard: React.FC = () => {
-  const [students, setStudents] = useState<StudentStats[]>(() => {
-    const saved = localStorage.getItem('mathcounts_roster');
-    return saved ? JSON.parse(saved) : generateMockStudents();
-  });
+  const [students, setStudents] = useState<StudentStats[]>([]);
+  const [assessmentColumns, setAssessmentColumns] = useState<AssessmentColumn[]>([]);
 
-  const [assessmentColumns, setAssessmentColumns] = useState<AssessmentColumn[]>(() => {
-    const saved = localStorage.getItem('mathcounts_cols');
-    return saved ? JSON.parse(saved) : MOCK_COLS;
-  });
-  
   const [showAddModal, setShowAddModal] = useState(false);
   const [showColModal, setShowColModal] = useState(false);
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const [showDeleteColConfirm, setShowDeleteColConfirm] = useState(false);
   const [colToDeleteId, setColToDeleteId] = useState<string | null>(null);
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
-  
+
   const [editingColId, setEditingColId] = useState<string | null>(null);
   const [tempColScores, setTempColScores] = useState<Record<string, string>>({});
-  
+
   const detailsRef = useRef<HTMLDivElement>(null);
 
   const [newColType, setNewColType] = useState<'Quiz' | 'School Round'>('Quiz');
@@ -97,13 +90,59 @@ const CoachDashboard: React.FC = () => {
     firstName: '', lastName: '', studentId: '', grade: '6', mathLevel: 'Alg 1', gender: 'Other', tryoutScore: 0
   });
 
-  useEffect(() => {
-    localStorage.setItem('mathcounts_roster', JSON.stringify(students));
-  }, [students]);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingStudent, setEditingStudent] = useState<StudentStats | null>(null);
 
   useEffect(() => {
-    localStorage.setItem('mathcounts_cols', JSON.stringify(assessmentColumns));
-  }, [assessmentColumns]);
+    const fetchGlobalRoster = async () => {
+      try {
+        const rosterSnap = await getDocs(collection(db, 'roster'));
+        let rosterData: StudentStats[] = [];
+        rosterSnap.forEach(d => {
+          rosterData.push({ ...d.data(), id: d.id } as StudentStats);
+        });
+
+        if (rosterData.length === 0) {
+          const mocks = generateMockStudents();
+          const batch = writeBatch(db);
+          mocks.forEach(m => {
+            const docRef = doc(collection(db, 'roster'));
+            batch.set(docRef, { ...m, id: docRef.id });
+            rosterData.push({ ...m, id: docRef.id });
+          });
+          await batch.commit();
+        } else {
+          // Auto-clean database by stripping deprecated fields immediately
+          const batch = writeBatch(db);
+          let needsClean = false;
+          rosterSnap.docs.forEach(documentSnapshot => {
+            const data = documentSnapshot.data();
+            if (data.averageSprintScore !== undefined || data.averageTargetScore !== undefined) {
+              batch.update(documentSnapshot.ref, {
+                averageSprintScore: deleteField(),
+                averageTargetScore: deleteField()
+              });
+              needsClean = true;
+            }
+          });
+          if (needsClean) await batch.commit();
+        }
+
+        setStudents(rosterData);
+
+        const colsDoc = await getDoc(doc(db, 'metadata', 'columns'));
+        if (colsDoc.exists()) {
+          setAssessmentColumns(colsDoc.data().cols);
+        } else {
+          setAssessmentColumns(MOCK_COLS);
+          await setDoc(doc(db, 'metadata', 'columns'), { cols: MOCK_COLS });
+        }
+      } catch (err) {
+        console.error("Failed to fetch cloud roster", err);
+      }
+    };
+    fetchGlobalRoster();
+  }, []);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -130,6 +169,8 @@ const CoachDashboard: React.FC = () => {
     };
     const updatedCols = [...assessmentColumns, col];
     setAssessmentColumns(updatedCols);
+    setDoc(doc(db, 'metadata', 'columns'), { cols: updatedCols }).catch(console.error);
+
     setShowColModal(false);
     setEditingColId(col.id);
     const initialScores: Record<string, string> = {};
@@ -147,11 +188,19 @@ const CoachDashboard: React.FC = () => {
     const id = colToDeleteId;
     const updatedCols = assessmentColumns.filter(c => c.id !== id);
     setAssessmentColumns(updatedCols);
-    setStudents(students.map(s => {
+    setDoc(doc(db, 'metadata', 'columns'), { cols: updatedCols }).catch(console.error);
+
+    const batch = writeBatch(db);
+    const nextRoster = students.map(s => {
       const nextScores = { ...(s.dynamicScores || {}) };
       delete nextScores[id];
+      batch.update(doc(db, 'roster', s.id), { dynamicScores: nextScores });
       return { ...s, dynamicScores: nextScores };
-    }));
+    });
+
+    setStudents(nextRoster);
+    batch.commit().catch(console.error);
+
     if (editingColId === id) {
       setEditingColId(null);
       setTempColScores({});
@@ -171,11 +220,18 @@ const CoachDashboard: React.FC = () => {
 
   const applyColumnChanges = () => {
     if (!editingColId) return;
-    setStudents(students.map(s => {
+    const batch = writeBatch(db);
+
+    const updatedRoster = students.map(s => {
       const updatedDynamic = { ...(s.dynamicScores || {}) };
       updatedDynamic[editingColId] = parseInt(tempColScores[s.id]) || 0;
+      batch.update(doc(db, 'roster', s.id), { dynamicScores: updatedDynamic });
       return { ...s, dynamicScores: updatedDynamic };
-    }));
+    });
+
+    setStudents(updatedRoster);
+    batch.commit().catch(console.error);
+
     setEditingColId(null);
     setTempColScores({});
   };
@@ -183,12 +239,21 @@ const CoachDashboard: React.FC = () => {
   const handleDiscardConfirm = () => {
     if (!editingColId) return;
     const idToDelete = editingColId;
-    setAssessmentColumns(prev => prev.filter(c => c.id !== idToDelete));
-    setStudents(prev => prev.map(s => {
+    const updatedCols = assessmentColumns.filter(c => c.id !== idToDelete);
+    setAssessmentColumns(updatedCols);
+    setDoc(doc(db, 'metadata', 'columns'), { cols: updatedCols }).catch(console.error);
+
+    const batch = writeBatch(db);
+    const nextRoster = students.map(s => {
       const nextScores = { ...(s.dynamicScores || {}) };
       delete nextScores[idToDelete];
+      batch.update(doc(db, 'roster', s.id), { dynamicScores: nextScores });
       return { ...s, dynamicScores: nextScores };
-    }));
+    });
+
+    setStudents(nextRoster);
+    batch.commit().catch(console.error);
+
     setEditingColId(null);
     setTempColScores({});
     setShowDiscardConfirm(false);
@@ -200,24 +265,47 @@ const CoachDashboard: React.FC = () => {
 
   const handleAddStudent = (e: React.FormEvent) => {
     e.preventDefault();
-    const student: StudentStats = {
+    const studentObj: any = {
       ...newStudent as StudentStats,
-      id: Math.random().toString(36).substr(2, 9),
       problemsSolved: 0,
-      averageSprintScore: 0,
-      averageTargetScore: 0,
       badges: [],
       dynamicScores: {}
     };
-    setStudents([...students, student]);
+
+    addDoc(collection(db, 'roster'), studentObj).then(docRef => {
+      studentObj.id = docRef.id;
+      // Rewrite the ID in Firestore just to be safe identically mapped
+      updateDoc(docRef, { id: docRef.id });
+      setStudents([...students, studentObj as StudentStats]);
+    }).catch(console.error);
+
     setShowAddModal(false);
     setNewStudent({ firstName: '', lastName: '', studentId: '', grade: '6', mathLevel: 'Alg 1', gender: 'Other', tryoutScore: 0 });
   };
 
   const handleDeleteStudent = (id: string) => {
-    if (confirm('Remove student from roster?')) {
-      setStudents(students.filter(s => s.id !== id));
+    if (confirm('Remove student from roster globally?')) {
+      deleteDoc(doc(db, 'roster', id)).then(() => {
+        setStudents(students.filter(s => s.id !== id));
+      }).catch(console.error);
     }
+  };
+
+  const startEditingStudent = (student: StudentStats) => {
+    setEditingStudent(student);
+    setShowEditModal(true);
+  };
+
+  const handleUpdateStudent = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingStudent) return;
+
+    updateDoc(doc(db, 'roster', editingStudent.id), editingStudent as any).then(() => {
+      setStudents(prev => prev.map(s => s.id === editingStudent.id ? editingStudent : s));
+    }).catch(console.error);
+
+    setShowEditModal(false);
+    setEditingStudent(null);
   };
 
   const getRank = (score: number, list: number[]) => {
@@ -226,7 +314,7 @@ const CoachDashboard: React.FC = () => {
 
   const quizColumns = assessmentColumns.filter(c => c.type === 'Quiz');
   const schoolRoundColumns = assessmentColumns.filter(c => c.type === 'School Round');
-  
+
   const studentQuizData = useMemo(() => {
     const dataMap: Record<string, { ranks: number[], scores: number[] }> = {};
     quizColumns.forEach(col => {
@@ -273,7 +361,7 @@ const CoachDashboard: React.FC = () => {
         if (editingColId === col.id) return parseInt(tempColScores[s.id]) || 0;
         return s.dynamicScores?.[col.id] || 0;
       });
-      const score = (editingColId === col.id) 
+      const score = (editingColId === col.id)
         ? (parseInt(tempColScores[studentId]) || 0)
         : (student.dynamicScores?.[col.id] || 0);
       return getRank(score, allScores);
@@ -321,7 +409,7 @@ const CoachDashboard: React.FC = () => {
           <p className="text-slate-500 mt-1">Weighted club rankings. Best students (lowest Final Score) are at the top.</p>
         </div>
         <div className="flex gap-3">
-          <button 
+          <button
             onClick={() => { localStorage.clear(); window.location.reload(); }}
             className="text-xs text-slate-400 hover:text-indigo-600 transition-colors flex items-center gap-1"
           >
@@ -346,8 +434,8 @@ const CoachDashboard: React.FC = () => {
             </div>
           </div>
           <div className="flex gap-3">
-             <button onClick={() => setShowDiscardConfirm(true)} className="px-4 py-2 bg-amber-500 hover:bg-amber-400 rounded-xl font-bold text-xs transition-colors">Discard Column</button>
-             <button onClick={applyColumnChanges} className="px-6 py-2 bg-white text-amber-600 hover:bg-amber-50 rounded-xl font-black text-xs shadow-md transition-all">Apply & Save</button>
+            <button onClick={() => setShowDiscardConfirm(true)} className="px-4 py-2 bg-amber-500 hover:bg-amber-400 rounded-xl font-bold text-xs transition-colors">Discard Column</button>
+            <button onClick={applyColumnChanges} className="px-6 py-2 bg-white text-amber-600 hover:bg-amber-50 rounded-xl font-black text-xs shadow-md transition-all">Apply & Save</button>
           </div>
         </div>
       )}
@@ -392,7 +480,7 @@ const CoachDashboard: React.FC = () => {
               const tryoutRank = getRank(student.tryoutScore, students.map(s => s.tryoutScore));
               const avgRank = getQuizAvgRank(student.id);
               const finalScore = student.finalScoreNumeric === 999 ? '0.00' : student.finalScoreNumeric.toFixed(2);
-              
+
               return (
                 <tr key={student.id} className={`hover:bg-slate-50 transition-colors group ${editingColId ? 'bg-slate-50/20' : ''}`}>
                   <td className="px-4 py-4 sticky left-0 bg-white group-hover:bg-slate-50 z-10">
@@ -405,12 +493,12 @@ const CoachDashboard: React.FC = () => {
                       <button onClick={() => setSelectedStudentId(student.id === selectedStudentId ? null : student.id)} className="info-trigger p-1 text-slate-300 hover:text-indigo-600 rounded-lg transition-colors"><InformationCircleIcon className="w-3.5 h-3.5" /></button>
                       {selectedStudentId === student.id && (
                         <div ref={detailsRef} className="absolute left-full top-0 ml-4 z-[999] w-64 bg-slate-900 text-white p-6 rounded-2xl shadow-2xl border border-slate-700 animate-in fade-in slide-in-from-left-2">
-                           <p className="font-black text-indigo-400 mb-2">{student.firstName} {student.lastName}</p>
-                           <p className="text-xs text-slate-400 uppercase tracking-widest mb-4">ID: {student.studentId}</p>
-                           <div className="grid grid-cols-2 gap-4 text-sm">
-                             <div><p className="text-[9px] text-slate-500 font-bold uppercase">Grade</p><p>{student.grade}th</p></div>
-                             <div><p className="text-[9px] text-slate-500 font-bold uppercase">Math</p><p>{student.mathLevel}</p></div>
-                           </div>
+                          <p className="font-black text-indigo-400 mb-2">{student.firstName} {student.lastName}</p>
+                          <p className="text-xs text-slate-400 uppercase tracking-widest mb-4">ID: {student.studentId}</p>
+                          <div className="grid grid-cols-2 gap-4 text-sm">
+                            <div><p className="text-[9px] text-slate-500 font-bold uppercase">Grade</p><p>{student.grade}th</p></div>
+                            <div><p className="text-[9px] text-slate-500 font-bold uppercase">Math</p><p>{student.mathLevel}</p></div>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -439,9 +527,12 @@ const CoachDashboard: React.FC = () => {
                   <td className="px-4 py-4 bg-emerald-50/20 border-l-4 border-emerald-100 whitespace-nowrap text-center font-black text-sm text-emerald-700">
                     {finalScore}
                   </td>
-                  <td className="px-4 py-4 text-right">
+                  <td className="px-4 py-4 text-right whitespace-nowrap">
                     {!editingColId && (
-                      <button onClick={() => handleDeleteStudent(student.id)} className="p-1.5 text-slate-200 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all" title="Delete Student"><TrashIcon className="w-4 h-4" /></button>
+                      <div className="flex justify-end gap-1">
+                        <button onClick={() => startEditingStudent(student)} className="p-1.5 text-slate-200 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-all" title="Edit Student"><PencilSquareIcon className="w-4 h-4" /></button>
+                        <button onClick={() => handleDeleteStudent(student.id)} className="p-1.5 text-slate-200 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all" title="Delete Student"><TrashIcon className="w-4 h-4" /></button>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -489,19 +580,19 @@ const CoachDashboard: React.FC = () => {
               <div className="space-y-3">
                 <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest px-1">Category</label>
                 <div className="grid grid-cols-1 gap-3">
-                   <button type="button" onClick={() => setNewColType('Quiz')} className={`p-6 rounded-2xl font-bold border-2 transition-all flex items-center gap-4 ${newColType === 'Quiz' ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg' : 'bg-white text-slate-500 border-slate-100 hover:bg-slate-50'}`}>
-                     <div className={`p-3 rounded-xl ${newColType === 'Quiz' ? 'bg-white/20' : 'bg-indigo-50 text-indigo-500'}`}><ClipboardDocumentCheckIcon className="w-6 h-6" /></div>
-                     <div className="text-left"><p className="text-lg">Quiz</p><p className={`text-xs ${newColType === 'Quiz' ? 'text-indigo-100' : 'text-slate-400'}`}>Short weekly warmup</p></div>
-                   </button>
-                   <button type="button" onClick={() => setNewColType('School Round')} className={`p-6 rounded-2xl font-bold border-2 transition-all flex items-center gap-4 ${newColType === 'School Round' ? 'bg-teal-600 text-white border-teal-600 shadow-lg' : 'bg-white text-slate-500 border-slate-100 hover:bg-slate-50'}`}>
-                     <div className={`p-3 rounded-xl ${newColType === 'School Round' ? 'bg-white/20' : 'bg-teal-50 text-teal-500'}`}><AcademicCapIcon className="w-6 h-6" /></div>
-                     <div className="text-left"><p className="text-lg">School Round</p><p className={`text-xs ${newColType === 'School Round' ? 'text-teal-100' : 'text-slate-400'}`}>Full mock competition</p></div>
-                   </button>
+                  <button type="button" onClick={() => setNewColType('Quiz')} className={`p-6 rounded-2xl font-bold border-2 transition-all flex items-center gap-4 ${newColType === 'Quiz' ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg' : 'bg-white text-slate-500 border-slate-100 hover:bg-slate-50'}`}>
+                    <div className={`p-3 rounded-xl ${newColType === 'Quiz' ? 'bg-white/20' : 'bg-indigo-50 text-indigo-500'}`}><ClipboardDocumentCheckIcon className="w-6 h-6" /></div>
+                    <div className="text-left"><p className="text-lg">Quiz</p><p className={`text-xs ${newColType === 'Quiz' ? 'text-indigo-100' : 'text-slate-400'}`}>Short weekly warmup</p></div>
+                  </button>
+                  <button type="button" onClick={() => setNewColType('School Round')} className={`p-6 rounded-2xl font-bold border-2 transition-all flex items-center gap-4 ${newColType === 'School Round' ? 'bg-teal-600 text-white border-teal-600 shadow-lg' : 'bg-white text-slate-500 border-slate-100 hover:bg-slate-50'}`}>
+                    <div className={`p-3 rounded-xl ${newColType === 'School Round' ? 'bg-white/20' : 'bg-teal-50 text-teal-500'}`}><AcademicCapIcon className="w-6 h-6" /></div>
+                    <div className="text-left"><p className="text-lg">School Round</p><p className={`text-xs ${newColType === 'School Round' ? 'text-teal-100' : 'text-slate-400'}`}>Full mock competition</p></div>
+                  </button>
                 </div>
               </div>
               <div className="flex gap-3 pt-4">
-                 <button type="button" onClick={() => setShowColModal(false)} className="flex-1 py-4 font-bold text-slate-400 hover:bg-slate-50 rounded-2xl transition-all">Cancel</button>
-                 <button type="submit" className="flex-2 bg-slate-900 text-white font-black px-10 py-4 rounded-2xl shadow-lg transition-all hover:bg-slate-800">Create</button>
+                <button type="button" onClick={() => setShowColModal(false)} className="flex-1 py-4 font-bold text-slate-400 hover:bg-slate-50 rounded-2xl transition-all">Cancel</button>
+                <button type="submit" className="flex-2 bg-slate-900 text-white font-black px-10 py-4 rounded-2xl shadow-lg transition-all hover:bg-slate-800">Create</button>
               </div>
             </form>
           </div>
@@ -514,21 +605,48 @@ const CoachDashboard: React.FC = () => {
             <h3 className="text-2xl font-black text-slate-900 mb-8">Enroll Student</h3>
             <form onSubmit={handleAddStudent} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <input required type="text" placeholder="First Name" value={newStudent.firstName} onChange={e => setNewStudent({...newStudent, firstName: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500" />
-                <input required type="text" placeholder="Last Name" value={newStudent.lastName} onChange={e => setNewStudent({...newStudent, lastName: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500" />
+                <input required type="text" placeholder="First Name" value={newStudent.firstName} onChange={e => setNewStudent({ ...newStudent, firstName: e.target.value })} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500" />
+                <input required type="text" placeholder="Last Name" value={newStudent.lastName} onChange={e => setNewStudent({ ...newStudent, lastName: e.target.value })} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500" />
               </div>
-              <input required type="text" placeholder="Student ID" value={newStudent.studentId} onChange={e => setNewStudent({...newStudent, studentId: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500" />
+              <input required type="text" placeholder="Student ID" value={newStudent.studentId} onChange={e => setNewStudent({ ...newStudent, studentId: e.target.value })} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500" />
               <div className="grid grid-cols-2 gap-4">
-                <select value={newStudent.grade} onChange={e => setNewStudent({...newStudent, grade: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500">
+                <select value={newStudent.grade} onChange={e => setNewStudent({ ...newStudent, grade: e.target.value })} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500">
                   <option value="6">6th Grade</option><option value="7">7th Grade</option><option value="8">8th Grade</option>
                 </select>
-                <select value={newStudent.mathLevel} onChange={e => setNewStudent({...newStudent, mathLevel: e.target.value as MathLevel})} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500">
-                   <option value="Alg 1">Alg 1</option><option value="Geo">Geo</option><option value="Alg 2">Alg 2</option><option value="PreCal">PreCal</option>
+                <select value={newStudent.mathLevel} onChange={e => setNewStudent({ ...newStudent, mathLevel: e.target.value as MathLevel })} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500">
+                  <option value="Alg 1">Alg 1</option><option value="Geo">Geo</option><option value="Alg 2">Alg 2</option><option value="PreCal">PreCal</option>
                 </select>
               </div>
               <div className="pt-6 flex gap-3">
-                 <button type="button" onClick={() => setShowAddModal(false)} className="flex-1 py-4 font-bold text-slate-400">Cancel</button>
-                 <button type="submit" className="flex-2 bg-indigo-600 text-white font-black px-10 py-4 rounded-2xl">Enroll</button>
+                <button type="button" onClick={() => setShowAddModal(false)} className="flex-1 py-4 font-bold text-slate-400">Cancel</button>
+                <button type="submit" className="flex-2 bg-indigo-600 text-white font-black px-10 py-4 rounded-2xl">Enroll</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {showEditModal && editingStudent && (
+        <div className="fixed inset-0 z-[150] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-white w-full max-w-lg rounded-[2.5rem] shadow-2xl p-10">
+            <h3 className="text-2xl font-black text-slate-900 mb-8">Edit Student</h3>
+            <form onSubmit={handleUpdateStudent} className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <input required type="text" placeholder="First Name" value={editingStudent.firstName} onChange={e => setEditingStudent({ ...editingStudent, firstName: e.target.value })} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500" />
+                <input required type="text" placeholder="Last Name" value={editingStudent.lastName} onChange={e => setEditingStudent({ ...editingStudent, lastName: e.target.value })} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500" />
+              </div>
+              <input required type="text" placeholder="Student ID" value={editingStudent.studentId} onChange={e => setEditingStudent({ ...editingStudent, studentId: e.target.value })} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500" />
+              <div className="grid grid-cols-2 gap-4">
+                <select value={editingStudent.grade} onChange={e => setEditingStudent({ ...editingStudent, grade: e.target.value })} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500">
+                  <option value="6">6th Grade</option><option value="7">7th Grade</option><option value="8">8th Grade</option>
+                </select>
+                <select value={editingStudent.mathLevel} onChange={e => setEditingStudent({ ...editingStudent, mathLevel: e.target.value as MathLevel })} className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500">
+                  <option value="Alg 1">Alg 1</option><option value="Geo">Geo</option><option value="Alg 2">Alg 2</option><option value="PreCal">PreCal</option>
+                </select>
+              </div>
+              <div className="pt-6 flex gap-3">
+                <button type="button" onClick={() => { setShowEditModal(false); setEditingStudent(null); }} className="flex-1 py-4 font-bold text-slate-400">Cancel</button>
+                <button type="submit" className="flex-2 bg-indigo-600 text-white font-black px-10 py-4 rounded-2xl">Update Info</button>
               </div>
             </form>
           </div>

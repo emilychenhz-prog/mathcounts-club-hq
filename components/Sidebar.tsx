@@ -2,16 +2,17 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { UserRole } from '../types';
-import { 
-  HomeIcon, 
-  UsersIcon, 
+import {
+  HomeIcon,
+  UsersIcon,
   ArrowLeftOnRectangleIcon,
   CalculatorIcon,
   CalendarDaysIcon,
   CalendarIcon,
   TrophyIcon,
   MapIcon,
-  DocumentMagnifyingGlassIcon
+  DocumentMagnifyingGlassIcon,
+  ShieldCheckIcon
 } from '@heroicons/react/24/outline';
 
 interface SidebarProps {
@@ -33,6 +34,7 @@ const Sidebar: React.FC<SidebarProps> = ({ role, onLogout, userName }) => {
     { name: 'Practice Arena', path: '/practice', icon: CalculatorIcon, roles: [UserRole.STUDENT] },
     { name: 'My Badges', path: '/badges', icon: TrophyIcon, roles: [UserRole.STUDENT] },
     { name: 'Club Roster', path: '/roster', icon: UsersIcon, roles: [UserRole.COACH] },
+    { name: 'Accounts', path: '/admin', icon: ShieldCheckIcon, roles: [UserRole.ADMIN] },
   ];
 
   const filteredItems = navItems.filter(item => item.roles.includes(role));
@@ -55,11 +57,10 @@ const Sidebar: React.FC<SidebarProps> = ({ role, onLogout, userName }) => {
             <Link
               key={item.path}
               to={item.path}
-              className={`flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 ${
-                isActive 
-                  ? 'bg-indigo-50 text-indigo-700 font-semibold' 
-                  : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'
-              }`}
+              className={`flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 ${isActive
+                ? 'bg-indigo-50 text-indigo-700 font-semibold'
+                : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'
+                }`}
             >
               <item.icon className="w-5 h-5" />
               {item.name}

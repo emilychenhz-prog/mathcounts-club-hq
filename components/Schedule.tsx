@@ -1,8 +1,8 @@
 
 import React, { useState, useEffect } from 'react';
 import { UserRole, ScheduleEntry } from '../types';
-import { 
-  PlusIcon, 
+import {
+  PlusIcon,
   CalendarIcon,
   TrashIcon,
   UserIcon,
@@ -12,6 +12,8 @@ import {
   PencilSquareIcon,
   XMarkIcon
 } from '@heroicons/react/24/outline';
+import { db } from '../services/firebase';
+import { collection, doc, getDocs, setDoc, updateDoc, deleteDoc, writeBatch } from 'firebase/firestore';
 
 interface ScheduleProps {
   role: UserRole;
@@ -58,15 +60,9 @@ const isCarsonSkipCode = (code: CarsonDayCode | null) =>
 const Schedule: React.FC<ScheduleProps> = ({ role }) => {
   const isCoach = role === UserRole.COACH;
   const [activeTab, setActiveTab] = useState<'regular' | 'tournament'>('regular');
-  
-  const [schedule, setSchedule] = useState<ScheduleEntry[]>(() => {
-    const saved = localStorage.getItem('mathcounts_schedule');
-    return saved ? JSON.parse(saved) : [];
-  });
-  const [tournamentCalendar, setTournamentCalendar] = useState<TournamentItem[]>(() => {
-    const saved = localStorage.getItem('mathcounts_tournament_calendar');
-    return saved ? JSON.parse(saved) : [];
-  });
+
+  const [schedule, setSchedule] = useState<ScheduleEntry[]>([]);
+  const [tournamentCalendar, setTournamentCalendar] = useState<TournamentItem[]>([]);
 
   const [showWizard, setShowWizard] = useState(false);
   const [showSingleModal, setShowSingleModal] = useState(false);
@@ -95,12 +91,25 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
   const [editingTournamentId, setEditingTournamentId] = useState<string | null>(null);
 
   useEffect(() => {
-    localStorage.setItem('mathcounts_schedule', JSON.stringify(schedule));
-  }, [schedule]);
+    const fetchTimelines = async () => {
+      try {
+        const schedSnap = await getDocs(collection(db, 'schedule'));
+        const tourneySnap = await getDocs(collection(db, 'tournaments'));
 
-  useEffect(() => {
-    localStorage.setItem('mathcounts_tournament_calendar', JSON.stringify(tournamentCalendar));
-  }, [tournamentCalendar]);
+        const loadedSchedule: ScheduleEntry[] = [];
+        schedSnap.forEach(d => loadedSchedule.push({ ...d.data(), id: d.id } as ScheduleEntry));
+
+        const loadedTourneys: TournamentItem[] = [];
+        tourneySnap.forEach(d => loadedTourneys.push({ ...d.data(), id: d.id } as TournamentItem));
+
+        setSchedule(loadedSchedule.sort((a, b) => a.date.localeCompare(b.date)));
+        setTournamentCalendar(loadedTourneys.sort((a, b) => a.date.localeCompare(b.date)));
+      } catch (err) {
+        console.error("Failed to fetch cloud timelines", err);
+      }
+    };
+    fetchTimelines();
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('mathcounts_ab_calendar_url', abCalendarUrl);
@@ -113,16 +122,18 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
     }
   }, [singleContent]);
 
-  const generateSchedule = (e: React.FormEvent) => {
+  const generateSchedule = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!startDate || !endDate || selectedDays.length === 0) return;
 
     const start = new Date(startDate + 'T00:00:00');
     const end = new Date(endDate + 'T00:00:00');
     const newEntries: ScheduleEntry[] = [];
-    
+
     let current = new Date(start);
     let dayToggle = true; // Fallback toggle if date not found in Carson A/B map
+
+    const batch = writeBatch(db);
 
     while (current <= end) {
       const dayOfWeek = current.getDay();
@@ -132,23 +143,35 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
         const mappedDay = getCarsonDayType(iso);
         const isMissingDayType = mappedDay === null;
         const isSkipDay = isMissingDayType || isCarsonSkipCode(dayCode);
-        newEntries.push({
-          id: Math.random().toString(36).substr(2, 9),
+
+        const docRef = doc(collection(db, 'schedule'));
+        const entryObj: ScheduleEntry = {
+          id: docRef.id,
           date: iso,
           content: isSkipDay ? 'Skip' : 'Practice',
           isDayA: mappedDay ?? dayToggle,
           coach: isSkipDay ? 'N/A' : 'Fei'
-        });
+        };
+
+        batch.set(docRef, entryObj);
+        newEntries.push(entryObj);
+
         if (mappedDay === null) dayToggle = !dayToggle;
       }
       current.setDate(current.getDate() + 1);
     }
 
-    setSchedule([...schedule, ...newEntries].sort((a, b) => a.date.localeCompare(b.date)));
+    try {
+      await batch.commit();
+      setSchedule([...schedule, ...newEntries].sort((a, b) => a.date.localeCompare(b.date)));
+    } catch (err) {
+      console.error('Failed to generate batch schedule', err);
+    }
+
     setShowWizard(false);
   };
 
-  const handleAddSingleEntry = (e: React.FormEvent) => {
+  const handleAddSingleEntry = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!singleDate) return;
 
@@ -156,15 +179,23 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
     const mappedDay = getCarsonDayType(singleDate);
     const isMissingDayType = mappedDay === null;
     const isSkipDay = isMissingDayType || isCarsonSkipCode(dayCode);
+
+    const docRef = doc(collection(db, 'schedule'));
     const newEntry: ScheduleEntry = {
-      id: Math.random().toString(36).substr(2, 9),
+      id: docRef.id,
       date: singleDate,
       content: isSkipDay ? 'Skip' : singleContent,
       isDayA: mappedDay ?? singleIsDayA,
       coach: isSkipDay ? 'N/A' : singleCoach
     };
 
-    setSchedule([...schedule, newEntry].sort((a, b) => a.date.localeCompare(b.date)));
+    try {
+      await setDoc(docRef, newEntry);
+      setSchedule([...schedule, newEntry].sort((a, b) => a.date.localeCompare(b.date)));
+    } catch (err) {
+      console.error(err);
+    }
+
     setShowSingleModal(false);
     resetSingleForm();
   };
@@ -177,20 +208,23 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
   };
 
   const updateEntry = (id: string, field: keyof ScheduleEntry, value: any) => {
+    const updatedObj: Partial<ScheduleEntry> = { [field]: value };
+    if (field === 'content' && value === 'Skip') {
+      updatedObj.coach = 'N/A';
+    }
+
+    updateDoc(doc(db, 'schedule', id), updatedObj).catch(console.error);
+
     setSchedule(prev => prev.map(s => {
       if (s.id === id) {
-        let updated = { ...s, [field]: value };
-        // Rule: If topic is set to Skip, Lead Coach is set to N/A automatically
-        if (field === 'content' && value === 'Skip') {
-          updated.coach = 'N/A';
-        }
-        return updated;
+        return { ...s, ...updatedObj };
       }
       return s;
     }));
   };
 
   const removeEntry = (id: string) => {
+    deleteDoc(doc(db, 'schedule', id)).catch(console.error);
     setSchedule(schedule.filter(s => s.id !== id));
   };
 
@@ -199,23 +233,48 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
     if (entry) updateEntry(id, 'isDayA', !entry.isDayA);
   };
 
-  const clearSchedule = () => {
-    setSchedule([]);
+  const clearSchedule = async () => {
+    const batch = writeBatch(db);
+    schedule.forEach(s => {
+      batch.delete(doc(db, 'schedule', s.id));
+    });
+    try {
+      await batch.commit();
+      setSchedule([]);
+    } catch (err) {
+      console.error(err);
+    }
     setShowDeleteAllConfirm(false);
   };
 
-  const reapplyCalendarRules = () => {
-    setSchedule(prev => prev.map(entry => {
+  const reapplyCalendarRules = async () => {
+    const batch = writeBatch(db);
+    const updated = schedule.map(entry => {
       const code = getCarsonDayCode(entry.date);
       const mappedDay = getCarsonDayType(entry.date);
       const shouldSkip = mappedDay === null || isCarsonSkipCode(code);
-      return {
+
+      const newEntryObj = {
         ...entry,
         isDayA: mappedDay ?? entry.isDayA,
         content: shouldSkip ? 'Skip' : entry.content,
         coach: shouldSkip ? 'N/A' : entry.coach
       };
-    }));
+
+      batch.update(doc(db, 'schedule', entry.id), {
+        isDayA: newEntryObj.isDayA,
+        content: newEntryObj.content,
+        coach: newEntryObj.coach
+      });
+      return newEntryObj;
+    });
+
+    try {
+      await batch.commit();
+      setSchedule(updated);
+    } catch (err) {
+      console.error(err);
+    }
   };
 
   const resetTournamentForm = () => {
@@ -226,37 +285,40 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
     setEditingTournamentId(null);
   };
 
-  const upsertTournamentItem = (e: React.FormEvent) => {
+  const upsertTournamentItem = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!tournamentDate || !tournamentEvent.trim()) return;
 
     if (editingTournamentId) {
+      const updatedValues = {
+        date: tournamentDate,
+        event: tournamentEvent.trim(),
+        location: tournamentLocation.trim(),
+        notes: tournamentNotes.trim()
+      };
+
+      updateDoc(doc(db, 'tournaments', editingTournamentId), updatedValues).catch(console.error);
+
       setTournamentCalendar(prev =>
         prev
-          .map(item =>
-            item.id === editingTournamentId
-              ? {
-                  ...item,
-                  date: tournamentDate,
-                  event: tournamentEvent.trim(),
-                  location: tournamentLocation.trim(),
-                  notes: tournamentNotes.trim()
-                }
-              : item
-          )
+          .map(item => item.id === editingTournamentId ? { ...item, ...updatedValues } : item)
           .sort((a, b) => a.date.localeCompare(b.date))
       );
       resetTournamentForm();
       return;
     }
 
+    const docRef = doc(collection(db, 'tournaments'));
     const item: TournamentItem = {
-      id: Math.random().toString(36).slice(2),
+      id: docRef.id,
       date: tournamentDate,
       event: tournamentEvent.trim(),
       location: tournamentLocation.trim(),
       notes: tournamentNotes.trim()
     };
+
+    setDoc(docRef, item).catch(console.error);
+
     setTournamentCalendar(prev => [...prev, item].sort((a, b) => a.date.localeCompare(b.date)));
     resetTournamentForm();
   };
@@ -272,6 +334,7 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
   };
 
   const removeTournamentItem = (id: string) => {
+    deleteDoc(doc(db, 'tournaments', id)).catch(console.error);
     setTournamentCalendar(prev => prev.filter(item => item.id !== id));
     if (editingTournamentId === id) {
       resetTournamentForm();
@@ -297,17 +360,15 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
           <div className="mt-3 inline-flex p-1 bg-white border border-slate-200 rounded-2xl shadow-sm">
             <button
               onClick={() => setActiveTab('regular')}
-              className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
-                activeTab === 'regular' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'
-              }`}
+              className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${activeTab === 'regular' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'
+                }`}
             >
               Regular Calendar
             </button>
             <button
               onClick={() => setActiveTab('tournament')}
-              className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
-                activeTab === 'tournament' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'
-              }`}
+              className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${activeTab === 'tournament' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'
+                }`}
             >
               Tournament Calendar
             </button>
@@ -339,26 +400,26 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
         </div>
         {isCoach && activeTab === 'regular' && (
           <div className="flex gap-3 md:mt-16">
-            <button 
+            <button
               onClick={reapplyCalendarRules}
               className="bg-white border border-amber-200 text-amber-700 hover:bg-amber-50 px-5 py-2.5 rounded-xl font-bold text-sm transition-all"
             >
               Reapply A/B Rules
             </button>
-            <button 
+            <button
               onClick={() => setShowDeleteAllConfirm(true)}
               className="bg-white border border-red-200 text-red-500 hover:bg-red-50 px-5 py-2.5 rounded-xl font-bold text-sm transition-all"
             >
               Clear All
             </button>
-            <button 
+            <button
               onClick={() => { resetSingleForm(); setShowSingleModal(true); }}
               className="bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-50 px-5 py-2.5 rounded-xl font-bold text-sm transition-all flex items-center gap-2"
             >
               <PlusIcon className="w-4 h-4" />
               Add Meeting
             </button>
-            <button 
+            <button
               onClick={() => setShowWizard(true)}
               className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-6 py-2.5 rounded-xl flex items-center gap-2 shadow-lg shadow-indigo-100 transition-all active:scale-95"
             >
@@ -400,11 +461,10 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
                         <button
                           disabled={!isCoach}
                           onClick={() => toggleDayType(entry.id)}
-                          className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-tighter transition-all ${
-                            entry.isDayA
+                          className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-tighter transition-all ${entry.isDayA
                               ? 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200'
                               : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
-                          }`}
+                            }`}
                         >
                           {entry.isDayA ? 'A Day' : 'B Day'}
                         </button>
@@ -422,9 +482,8 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
                             </select>
                           </div>
                         ) : (
-                          <span className={`text-sm font-semibold px-3 py-1 rounded-lg ${
-                            entry.content === 'Skip' ? 'text-slate-400 bg-slate-100' : 'text-slate-600 bg-indigo-50/50'
-                          }`}>
+                          <span className={`text-sm font-semibold px-3 py-1 rounded-lg ${entry.content === 'Skip' ? 'text-slate-400 bg-slate-100' : 'text-slate-600 bg-indigo-50/50'
+                            }`}>
                             {entry.content}
                           </span>
                         )}
@@ -437,9 +496,8 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
                               disabled={entry.content === 'Skip'}
                               value={entry.coach}
                               onChange={(e) => updateEntry(entry.id, 'coach', e.target.value)}
-                              className={`bg-transparent border-b border-transparent hover:border-slate-200 focus:border-indigo-500 focus:bg-white px-2 py-1 outline-none text-sm font-bold w-full transition-all appearance-none cursor-pointer ${
-                                entry.content === 'Skip' ? 'text-slate-300 italic' : 'text-indigo-600'
-                              }`}
+                              className={`bg-transparent border-b border-transparent hover:border-slate-200 focus:border-indigo-500 focus:bg-white px-2 py-1 outline-none text-sm font-bold w-full transition-all appearance-none cursor-pointer ${entry.content === 'Skip' ? 'text-slate-300 italic' : 'text-indigo-600'
+                                }`}
                             >
                               {COACH_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                             </select>
@@ -586,14 +644,14 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
           <div className="bg-white w-full max-w-lg rounded-[2.5rem] shadow-2xl p-10 animate-in zoom-in-95 duration-300">
             <h3 className="text-2xl font-black text-slate-900 mb-2">Meeting Wizard</h3>
             <p className="text-slate-500 text-sm mb-8">Select start and end dates. Meetings will be generated for every occurrence of the chosen weekdays.</p>
-            
+
             <form onSubmit={generateSchedule} className="space-y-6">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Start Date</label>
-                  <input 
-                    type="date" 
-                    required 
+                  <input
+                    type="date"
+                    required
                     value={startDate}
                     onChange={(e) => setStartDate(e.target.value)}
                     className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500 font-bold text-sm"
@@ -601,9 +659,9 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
                 </div>
                 <div className="space-y-2">
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">End Date</label>
-                  <input 
-                    type="date" 
-                    required 
+                  <input
+                    type="date"
+                    required
                     value={endDate}
                     onChange={(e) => setEndDate(e.target.value)}
                     className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500 font-bold text-sm"
@@ -621,11 +679,10 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
                       onClick={() => {
                         setSelectedDays(prev => prev.includes(day.index) ? prev.filter(d => d !== day.index) : [...prev, day.index]);
                       }}
-                      className={`flex-1 py-3 px-2 rounded-xl text-xs font-black transition-all border-2 ${
-                        selectedDays.includes(day.index)
+                      className={`flex-1 py-3 px-2 rounded-xl text-xs font-black transition-all border-2 ${selectedDays.includes(day.index)
                           ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg shadow-indigo-100'
                           : 'bg-white text-slate-400 border-slate-100 hover:bg-slate-50'
-                      }`}
+                        }`}
                     >
                       {day.label}
                     </button>
@@ -634,15 +691,15 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
               </div>
 
               <div className="flex gap-4 pt-4">
-                <button 
-                  type="button" 
-                  onClick={() => setShowWizard(false)} 
+                <button
+                  type="button"
+                  onClick={() => setShowWizard(false)}
                   className="flex-1 py-4 font-bold text-slate-400 hover:bg-slate-50 rounded-2xl transition-all"
                 >
                   Cancel
                 </button>
-                <button 
-                  type="submit" 
+                <button
+                  type="submit"
                   disabled={selectedDays.length === 0}
                   className="flex-2 bg-indigo-600 text-white font-black px-12 py-4 rounded-2xl shadow-xl shadow-indigo-100 hover:bg-indigo-700 disabled:bg-slate-200 disabled:shadow-none transition-all flex items-center justify-center gap-2"
                 >
@@ -660,13 +717,13 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
           <div className="bg-white w-full max-w-lg rounded-[2.5rem] shadow-2xl p-10 animate-in zoom-in-95 duration-300">
             <h3 className="text-2xl font-black text-slate-900 mb-2">New Club Session</h3>
             <p className="text-slate-500 text-sm mb-8">Add a single specific meeting date to the club calendar.</p>
-            
+
             <form onSubmit={handleAddSingleEntry} className="space-y-5">
               <div className="space-y-2">
                 <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Meeting Date</label>
-                <input 
-                  type="date" 
-                  required 
+                <input
+                  type="date"
+                  required
                   value={singleDate}
                   onChange={(e) => setSingleDate(e.target.value)}
                   className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500 font-bold text-sm"
@@ -675,7 +732,7 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
 
               <div className="space-y-2">
                 <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Meeting Topic</label>
-                <select 
+                <select
                   value={singleContent}
                   onChange={(e) => setSingleContent(e.target.value)}
                   className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-indigo-500 font-semibold text-sm appearance-none cursor-pointer"
@@ -686,7 +743,7 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
 
               <div className="space-y-2">
                 <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Lead Coach</label>
-                <select 
+                <select
                   disabled={singleContent === 'Skip'}
                   value={singleCoach}
                   onChange={(e) => setSingleCoach(e.target.value)}
@@ -702,18 +759,16 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
                   <button
                     type="button"
                     onClick={() => setSingleIsDayA(true)}
-                    className={`flex-1 py-3 rounded-xl text-xs font-black border-2 transition-all ${
-                      singleIsDayA ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-400 border-slate-100'
-                    }`}
+                    className={`flex-1 py-3 rounded-xl text-xs font-black border-2 transition-all ${singleIsDayA ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-400 border-slate-100'
+                      }`}
                   >
                     A Day
                   </button>
                   <button
                     type="button"
                     onClick={() => setSingleIsDayA(false)}
-                    className={`flex-1 py-3 rounded-xl text-xs font-black border-2 transition-all ${
-                      !singleIsDayA ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-slate-400 border-slate-100'
-                    }`}
+                    className={`flex-1 py-3 rounded-xl text-xs font-black border-2 transition-all ${!singleIsDayA ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-slate-400 border-slate-100'
+                      }`}
                   >
                     B Day
                   </button>
@@ -721,15 +776,15 @@ const Schedule: React.FC<ScheduleProps> = ({ role }) => {
               </div>
 
               <div className="flex gap-4 pt-4">
-                <button 
-                  type="button" 
-                  onClick={() => { setShowSingleModal(false); resetSingleForm(); }} 
+                <button
+                  type="button"
+                  onClick={() => { setShowSingleModal(false); resetSingleForm(); }}
                   className="flex-1 py-4 font-bold text-slate-400 hover:bg-slate-50 rounded-2xl transition-all"
                 >
                   Cancel
                 </button>
-                <button 
-                  type="submit" 
+                <button
+                  type="submit"
                   className="flex-2 bg-indigo-600 text-white font-black px-12 py-4 rounded-2xl shadow-xl shadow-indigo-100 hover:bg-indigo-700 transition-all"
                 >
                   Confirm Meeting

@@ -1,14 +1,26 @@
 
 import React, { useState, useEffect } from 'react';
 import { UserRole, Announcement, ScheduleEntry } from '../types';
-import { 
+import {
   MegaphoneIcon,
   PlusIcon,
   PencilIcon,
   TrashIcon,
   XMarkIcon,
-  ExclamationTriangleIcon
+  ExclamationTriangleIcon,
+  TrophyIcon,
+  CalendarDaysIcon
 } from '@heroicons/react/24/solid';
+import { db } from '../services/firebase';
+import { collection, getDocs } from 'firebase/firestore';
+
+interface UnifiedEvent {
+  id: string;
+  date: string;
+  title: string;
+  subtitle: string;
+  type: 'Meeting' | 'Tournament';
+}
 
 const INITIAL_ANNOUNCEMENTS: Announcement[] = [
   { id: 1, title: 'State Finals Registration Open', date: 'Oct 24, 2025', content: 'All qualified students please check your email for the state registration link.' },
@@ -26,7 +38,7 @@ interface DashboardProps {
 const Dashboard: React.FC<DashboardProps> = ({ role, userName }) => {
   const isGuest = role === UserRole.GUEST;
   const isCoach = role === UserRole.COACH;
-  
+
   const [announcements, setAnnouncements] = useState<Announcement[]>(() => {
     const saved = localStorage.getItem('mathcounts_announcements');
     return saved ? JSON.parse(saved) : INITIAL_ANNOUNCEMENTS;
@@ -38,10 +50,7 @@ const Dashboard: React.FC<DashboardProps> = ({ role, userName }) => {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [newTitle, setNewTitle] = useState('');
   const [newContent, setNewContent] = useState('');
-  const [scheduleEntries, setScheduleEntries] = useState<ScheduleEntry[]>(() => {
-    const saved = localStorage.getItem('mathcounts_schedule');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [upcomingEvents, setUpcomingEvents] = useState<UnifiedEvent[]>([]);
 
   const parseAnnouncementDate = (value: string) => {
     const d = new Date(value);
@@ -52,16 +61,56 @@ const Dashboard: React.FC<DashboardProps> = ({ role, userName }) => {
     .sort((a, b) => parseAnnouncementDate(b.date) - parseAnnouncementDate(a.date))
     .slice(0, MAX_LATEST_ANNOUNCEMENTS);
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const upcomingEvents = [...scheduleEntries]
-    .filter(e => {
-      const d = new Date(e.date + 'T00:00:00');
-      d.setHours(0, 0, 0, 0);
-      return d >= today && e.content !== 'Skip';
-    })
-    .sort((a, b) => a.date.localeCompare(b.date))
-    .slice(0, MAX_UPCOMING_EVENTS);
+  useEffect(() => {
+    const fetchEvents = async () => {
+      try {
+        const schedSnap = await getDocs(collection(db, 'schedule'));
+        const tourneySnap = await getDocs(collection(db, 'tournaments'));
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const events: UnifiedEvent[] = [];
+
+        schedSnap.forEach(d => {
+          const data = d.data();
+          if (data.content === 'Skip') return;
+          const ed = new Date(data.date + 'T00:00:00');
+          ed.setHours(0, 0, 0, 0);
+          if (ed >= today) {
+            events.push({
+              id: d.id,
+              date: data.date,
+              title: data.content,
+              subtitle: data.isDayA ? 'A Day' : 'B Day',
+              type: 'Meeting'
+            });
+          }
+        });
+
+        tourneySnap.forEach(d => {
+          const data = d.data();
+          const ed = new Date(data.date + 'T00:00:00');
+          ed.setHours(0, 0, 0, 0);
+          if (ed >= today) {
+            events.push({
+              id: d.id,
+              date: data.date,
+              title: data.event,
+              subtitle: data.location || 'Tournament',
+              type: 'Tournament'
+            });
+          }
+        });
+
+        events.sort((a, b) => a.date.localeCompare(b.date));
+        setUpcomingEvents(events.slice(0, MAX_UPCOMING_EVENTS));
+      } catch (err) {
+        console.error("Failed to fetch upcoming events", err);
+      }
+    };
+    fetchEvents();
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('mathcounts_announcements', JSON.stringify(announcements));
@@ -85,7 +134,7 @@ const Dashboard: React.FC<DashboardProps> = ({ role, userName }) => {
     if (!newTitle.trim() || !newContent.trim()) return;
 
     if (editingId) {
-      setAnnouncements(announcements.map(a => 
+      setAnnouncements(announcements.map(a =>
         a.id === editingId ? { ...a, title: newTitle, content: newContent } : a
       ));
     } else {
@@ -122,9 +171,9 @@ const Dashboard: React.FC<DashboardProps> = ({ role, userName }) => {
             {isGuest ? "Mathcounts HQ" : isCoach ? `Coach Dashboard: ${userName}` : `Welcome back, ${userName}!`}
           </h2>
           <p className="text-slate-500 mt-2 text-lg">
-            {isGuest 
-              ? "The central hub for middle school competitive mathematics." 
-              : isCoach 
+            {isGuest
+              ? "The central hub for middle school competitive mathematics."
+              : isCoach
                 ? "Manage your club's news and track student success."
                 : "Ready to solve? Keep that 5-day streak alive."}
           </p>
@@ -139,7 +188,7 @@ const Dashboard: React.FC<DashboardProps> = ({ role, userName }) => {
                 Latest Announcements
               </h3>
               {isCoach && (
-                <button 
+                <button
                   onClick={() => setShowFormModal(true)}
                   className="bg-indigo-600 text-white px-5 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100"
                 >
@@ -185,14 +234,18 @@ const Dashboard: React.FC<DashboardProps> = ({ role, userName }) => {
             <h3 className="text-xl font-bold mb-6">Upcoming Events</h3>
             <div className="space-y-6">
               {upcomingEvents.map((event, i) => (
-                <div key={i} className="flex gap-4">
-                  <div className="bg-indigo-500/20 text-indigo-400 font-bold w-12 h-12 rounded-xl flex items-center justify-center shrink-0 border border-indigo-500/30">
-                    {new Date(event.date + 'T00:00:00').toLocaleDateString('en-US', { day: '2-digit' })}
+                <div key={i} className="flex gap-4 group cursor-default">
+                  <div className={`font-bold w-14 h-14 rounded-2xl flex flex-col items-center justify-center shrink-0 border transition-all ${event.type === 'Tournament' ? 'bg-amber-500/20 text-amber-400 border-amber-500/30 group-hover:bg-amber-500/30' : 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30 group-hover:bg-indigo-500/30'}`}>
+                    <span className="text-[10px] uppercase leading-none mb-0.5 font-black">{new Date(event.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short' })}</span>
+                    <span className="text-xl leading-none">{new Date(event.date + 'T00:00:00').toLocaleDateString('en-US', { day: '2-digit' })}</span>
                   </div>
-                  <div>
-                    <p className="font-bold text-sm">{event.content}</p>
-                    <p className="text-[10px] text-indigo-400 font-bold uppercase">
-                      {new Date(event.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: '2-digit' })} | {event.isDayA ? 'A Day' : 'B Day'}
+                  <div className="flex flex-col justify-center">
+                    <p className={`font-black text-sm flex items-center gap-2 ${event.type === 'Tournament' ? 'text-amber-100' : 'text-indigo-50'}`}>
+                      {event.type === 'Tournament' ? <TrophyIcon className="w-4 h-4 text-amber-500" /> : <CalendarDaysIcon className="w-4 h-4 text-indigo-500" />}
+                      {event.title}
+                    </p>
+                    <p className={`text-[11px] font-bold uppercase mt-1 ${event.type === 'Tournament' ? 'text-amber-500' : 'text-indigo-400'}`}>
+                      {event.subtitle}
                     </p>
                   </div>
                 </div>
@@ -211,27 +264,27 @@ const Dashboard: React.FC<DashboardProps> = ({ role, userName }) => {
           <div className="bg-white w-full max-w-lg rounded-[2.5rem] shadow-2xl p-10 animate-in zoom-in-95">
             <div className="flex justify-between items-center mb-8">
               <h3 className="text-2xl font-black text-slate-900">{editingId ? 'Edit Announcement' : 'New Post'}</h3>
-              <button onClick={resetForm} className="text-slate-400 hover:text-slate-600"><XMarkIcon className="w-6 h-6"/></button>
+              <button onClick={resetForm} className="text-slate-400 hover:text-slate-600"><XMarkIcon className="w-6 h-6" /></button>
             </div>
             <form onSubmit={handleSave} className="space-y-5">
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest px-1">Headline</label>
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   required
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
-                  placeholder="The major news..." 
+                  placeholder="The major news..."
                   className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-6 py-4 outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-semibold"
                 />
               </div>
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest px-1">Details</label>
-                <textarea 
+                <textarea
                   required
                   value={newContent}
                   onChange={(e) => setNewContent(e.target.value)}
-                  placeholder="Provide context and instructions..." 
+                  placeholder="Provide context and instructions..."
                   rows={4}
                   className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-6 py-4 outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-slate-600"
                 />

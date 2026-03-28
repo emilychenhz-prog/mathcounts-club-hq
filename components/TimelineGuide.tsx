@@ -1,17 +1,19 @@
 
 import React, { useEffect, useRef, useState } from 'react';
-import { 
-  ClipboardDocumentCheckIcon, 
-  UserGroupIcon, 
-  BeakerIcon, 
-  AcademicCapIcon, 
-  TrophyIcon, 
+import {
+  ClipboardDocumentCheckIcon,
+  UserGroupIcon,
+  BeakerIcon,
+  AcademicCapIcon,
+  TrophyIcon,
   FlagIcon,
   CheckCircleIcon,
   ClockIcon,
   DocumentArrowUpIcon,
   TrashIcon
 } from '@heroicons/react/24/outline';
+import { db } from '../services/firebase';
+import { doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
 
 const TIMELINE_STAGES = [
   {
@@ -139,67 +141,103 @@ interface StoredTransferEmail {
 }
 
 const TimelineGuide: React.FC = () => {
-  const [transferEmail, setTransferEmail] = useState<StoredTransferEmail | null>(() => {
-    const raw = localStorage.getItem('mathcounts_transfer_ownership_email');
-    return raw ? JSON.parse(raw) : null;
-  });
-  const [prepEmail, setPrepEmail] = useState<StoredTransferEmail | null>(() => {
-    const raw = localStorage.getItem('mathcounts_preparation_email_reference');
-    return raw ? JSON.parse(raw) : null;
-  });
+  const [transferEmail, setTransferEmail] = useState<StoredTransferEmail | null>(null);
+  const [prepEmail, setPrepEmail] = useState<StoredTransferEmail | null>(null);
+  const [isFetching, setIsFetching] = useState(true);
+
   const uploadRef = useRef<HTMLInputElement>(null);
   const prepUploadRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (!transferEmail) {
-      localStorage.removeItem('mathcounts_transfer_ownership_email');
-      return;
-    }
-    localStorage.setItem('mathcounts_transfer_ownership_email', JSON.stringify(transferEmail));
-  }, [transferEmail]);
-
-  useEffect(() => {
-    if (!prepEmail) {
-      localStorage.removeItem('mathcounts_preparation_email_reference');
-      return;
-    }
-    localStorage.setItem('mathcounts_preparation_email_reference', JSON.stringify(prepEmail));
-  }, [prepEmail]);
+    const fetchGlobalReferences = async () => {
+      try {
+        const prepSnap = await getDoc(doc(db, 'timeline_files', 'prepEmail'));
+        if (prepSnap.exists()) {
+          setPrepEmail(prepSnap.data() as StoredTransferEmail);
+        }
+        const transferSnap = await getDoc(doc(db, 'timeline_files', 'transferEmail'));
+        if (transferSnap.exists()) {
+          setTransferEmail(transferSnap.data() as StoredTransferEmail);
+        }
+      } catch (err) {
+        console.error("Failed to load global roadmap references", err);
+      } finally {
+        setIsFetching(false);
+      }
+    };
+    fetchGlobalReferences();
+  }, []);
 
   const handleUploadTransferEmail = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       const result = reader.result;
       if (typeof result !== 'string') return;
-      setTransferEmail({
+      const payload: StoredTransferEmail = {
         name: file.name,
         mimeType: file.type || 'application/octet-stream',
         dataUrl: result,
         updatedAt: new Date().toISOString()
-      });
+      };
+
+      try {
+        await setDoc(doc(db, 'timeline_files', 'transferEmail'), payload);
+        setTransferEmail(payload);
+      } catch (err) {
+        console.error(err);
+        alert('File is too large for Google Cloud Firestore limits (max 1MB payload).');
+      }
     };
     reader.readAsDataURL(file);
     e.target.value = '';
+  };
+
+  const removeTransferEmail = async () => {
+    try {
+      await deleteDoc(doc(db, 'timeline_files', 'transferEmail'));
+      setTransferEmail(null);
+    } catch (err) {
+      console.error(err);
+      alert('Failed to delete global reference.');
+    }
   };
 
   const handleUploadPrepEmail = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       const result = reader.result;
       if (typeof result !== 'string') return;
-      setPrepEmail({
+      const payload: StoredTransferEmail = {
         name: file.name,
         mimeType: file.type || 'application/octet-stream',
         dataUrl: result,
         updatedAt: new Date().toISOString()
-      });
+      };
+
+      try {
+        await setDoc(doc(db, 'timeline_files', 'prepEmail'), payload);
+        setPrepEmail(payload);
+      } catch (err) {
+        console.error(err);
+        alert('File is too large for Google Cloud Firestore limits (max 1MB payload).');
+      }
     };
     reader.readAsDataURL(file);
     e.target.value = '';
+  };
+
+  const removePrepEmail = async () => {
+    try {
+      await deleteDoc(doc(db, 'timeline_files', 'prepEmail'));
+      setPrepEmail(null);
+    } catch (err) {
+      console.error(err);
+      alert('Failed to delete global reference.');
+    }
   };
 
   return (
@@ -233,15 +271,15 @@ const TimelineGuide: React.FC = () => {
             const Icon = stage.icon;
 
             return (
-              <div 
-                key={stage.id} 
+              <div
+                key={stage.id}
                 className={`flex flex-col md:flex-row items-start md:items-center gap-8 ${isEven ? 'md:flex-row-reverse' : ''}`}
               >
                 {/* Content Card */}
                 <div className="flex-1 w-full">
                   <div className={`bg-white rounded-[2rem] p-8 border border-slate-200 shadow-sm hover:shadow-xl transition-all group relative overflow-hidden`}>
                     <div className={`absolute top-0 left-0 w-2 h-full bg-${stage.color}-500`}></div>
-                    
+
                     <div className="flex justify-between items-start mb-4">
                       <span className={`text-[10px] font-black uppercase tracking-widest text-${stage.color}-600 bg-${stage.color}-50 px-3 py-1 rounded-full`}>
                         {stage.period}
@@ -291,7 +329,7 @@ const TimelineGuide: React.FC = () => {
                                 Download
                               </a>
                               <button
-                                onClick={() => setPrepEmail(null)}
+                                onClick={removePrepEmail}
                                 className="text-xs font-bold text-red-500 hover:underline flex items-center gap-1"
                               >
                                 <TrashIcon className="w-4 h-4" />
@@ -333,7 +371,7 @@ const TimelineGuide: React.FC = () => {
                                 Download
                               </a>
                               <button
-                                onClick={() => setTransferEmail(null)}
+                                onClick={removeTransferEmail}
                                 className="text-xs font-bold text-red-500 hover:underline flex items-center gap-1"
                               >
                                 <TrashIcon className="w-4 h-4" />
@@ -386,9 +424,9 @@ const TimelineGuide: React.FC = () => {
             Mathcounts National provides comprehensive resources, including the Official School Handbook and the OPLET problem database.
           </p>
         </div>
-        <a 
-          href="https://www.mathcounts.org" 
-          target="_blank" 
+        <a
+          href="https://www.mathcounts.org"
+          target="_blank"
           rel="noopener noreferrer"
           className="bg-white text-indigo-900 font-black px-8 py-4 rounded-2xl hover:bg-indigo-50 transition-all shadow-lg whitespace-nowrap"
         >

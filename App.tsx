@@ -1,5 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
+import { useAuth } from './components/auth/AuthContext';
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { UserRole, SessionData } from './types';
 import Sidebar from './components/Sidebar';
@@ -12,42 +13,33 @@ import Badges from './components/Badges';
 import Schedule from './components/Schedule';
 import TimelineGuide from './components/TimelineGuide';
 import DataAnalyzer from './components/DataAnalyzer';
+import AdminDashboard from './components/AdminDashboard';
 import { ArrowRightOnRectangleIcon } from '@heroicons/react/24/outline';
 
 const App: React.FC = () => {
-  const [session, setSession] = useState<SessionData>(() => {
-    const saved = localStorage.getItem('mathcounts_session');
-    return saved ? JSON.parse(saved) : { role: UserRole.GUEST, userName: '' };
-  });
-
+  const { session, currentUser, loading, logout } = useAuth();
   const [isLoginView, setIsLoginView] = useState(false);
-
-  useEffect(() => {
-    if (session.role !== UserRole.GUEST) {
-      localStorage.setItem('mathcounts_session', JSON.stringify(session));
-    } else {
-      localStorage.removeItem('mathcounts_session');
-    }
-  }, [session]);
-
-  const handleLogin = (name: string) => {
-    const role = (name.toLowerCase().includes('coach') || name.toLowerCase().includes('admin')) 
-      ? UserRole.COACH 
-      : UserRole.STUDENT;
-    
-    setSession({ userName: name, role });
-    setIsLoginView(false);
-  };
-
-  const handleLogout = () => {
-    setSession({ role: UserRole.GUEST, userName: '' });
-  };
 
   const triggerLogin = () => setIsLoginView(true);
   const cancelLogin = () => setIsLoginView(false);
 
+  // Auto-hide login view if auth state changes to logged in
+  useEffect(() => {
+    if (currentUser) {
+      setIsLoginView(false);
+    }
+  }, [currentUser]);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-indigo-600"></div>
+      </div>
+    );
+  }
+
   if (isLoginView) {
-    return <Login onLogin={handleLogin} onCancel={cancelLogin} />;
+    return <Login onCancel={cancelLogin} />;
   }
 
   const isGuest = session.role === UserRole.GUEST;
@@ -55,15 +47,15 @@ const App: React.FC = () => {
   return (
     <HashRouter>
       <div className="flex min-h-screen bg-slate-50 relative">
-        <Sidebar 
-          role={session.role} 
-          onLogout={handleLogout} 
-          userName={session.userName} 
+        <Sidebar
+          role={session.role}
+          onLogout={logout}
+          userName={session.userName}
         />
-        
+
         <div className="fixed top-6 right-6 z-40 flex items-center gap-4">
           {isGuest ? (
-            <button 
+            <button
               onClick={triggerLogin}
               className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg shadow-indigo-200 transition-all active:scale-95"
             >
@@ -85,8 +77,8 @@ const App: React.FC = () => {
 
         <main className="flex-1 p-4 md:p-8 lg:p-12 overflow-auto pt-20 md:pt-12">
           <Routes>
-            <Route path="/" element={<Dashboard role={session.role} userName={session.userName} />} />
-            
+            <Route path="/" element={session.role === UserRole.ADMIN ? <Navigate to="/admin" replace /> : <Dashboard role={session.role} userName={session.userName} />} />
+
             {(session.role === UserRole.STUDENT || session.role === UserRole.COACH) && (
               <>
                 <Route path="/schedule" element={<Schedule role={session.role} />} />
@@ -108,7 +100,13 @@ const App: React.FC = () => {
                 <Route path="/analyzer" element={<DataAnalyzer />} />
               </>
             )}
-            
+
+            {session.role === UserRole.ADMIN && (
+              <>
+                <Route path="/admin" element={<AdminDashboard />} />
+              </>
+            )}
+
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>

@@ -1,24 +1,26 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { extractProblemDataFromPdf } from '../services/geminiService';
 import { AnalyzedProblem } from '../types';
-import { 
-  CloudArrowUpIcon, 
-  DocumentTextIcon, 
-  CheckCircleIcon, 
-  MagnifyingGlassIcon, 
-  TrashIcon, 
-  ExclamationTriangleIcon, 
-  BeakerIcon, 
-  WrenchScrewdriverIcon, 
-  SparklesIcon, 
-  PlusIcon, 
-  ArrowPathRoundedSquareIcon, 
-  XMarkIcon, 
-  ArrowDownTrayIcon, 
-  DocumentArrowUpIcon, 
-  InformationCircleIcon, 
-  FunnelIcon, 
-  ClipboardDocumentCheckIcon, 
+import { db } from '../services/firebase';
+import { collection, doc, getDocs, setDoc, writeBatch } from 'firebase/firestore';
+import {
+  CloudArrowUpIcon,
+  DocumentTextIcon,
+  CheckCircleIcon,
+  MagnifyingGlassIcon,
+  TrashIcon,
+  ExclamationTriangleIcon,
+  BeakerIcon,
+  WrenchScrewdriverIcon,
+  SparklesIcon,
+  PlusIcon,
+  ArrowPathRoundedSquareIcon,
+  XMarkIcon,
+  ArrowDownTrayIcon,
+  DocumentArrowUpIcon,
+  InformationCircleIcon,
+  FunnelIcon,
+  ClipboardDocumentCheckIcon,
   AcademicCapIcon,
   RocketLaunchIcon,
   ChartPieIcon,
@@ -30,8 +32,8 @@ import {
 interface QuizRule {
   id: string;
   type: 'Sprint' | 'Target';
-  categories: string[]; 
-  problemSets: string[]; 
+  categories: string[];
+  problemSets: string[];
   difficulties: string[];
   count: number;
 }
@@ -55,15 +57,11 @@ const DataAnalyzer: React.FC = () => {
   const [files, setFiles] = useState<File[]>([]);
   const [uploadYear, setUploadYear] = useState('2526');
   const [loading, setLoading] = useState(false);
-  const [results, setResults] = useState<AnalyzedProblem[]>(() => {
-    const saved = localStorage.getItem('mathcounts_analyzed_data');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [results, setResults] = useState<AnalyzedProblem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [showClearConfirm, setShowClearConfirm] = useState(false);
-  
-  const importInputRef = useRef<HTMLInputElement>(null);
+
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
   // Quiz Factory State
@@ -81,7 +79,7 @@ const DataAnalyzer: React.FC = () => {
   const [generationError, setGenerationError] = useState<string | null>(null);
   const isStrictTargetRequested = true;
   const isStrictSprintRequested = true;
-  
+
   // Rule Modal State
   const [newRuleType, setNewRuleType] = useState<'Sprint' | 'Target'>('Sprint');
   const [newRuleCategories, setNewRuleCategories] = useState<string[]>([]);
@@ -90,11 +88,55 @@ const DataAnalyzer: React.FC = () => {
   const [newRuleCount, setNewRuleCount] = useState(1);
 
   const getProblemKey = (p: Pick<AnalyzedProblem, 'problemId' | 'year'>) =>
-    `${String(p.problemId || '').trim()}::${String(p.year || '').trim()}`;
+    `${String(p.problemId || '').trim()}_${String(p.year || '').trim()}`.replace(/\//g, '-');
+
+  const pushToCloudInChunks = async (problemsToSync: AnalyzedProblem[]) => {
+    try {
+      const chunkSize = 450; // Google Cloud Limit is 500 per batch
+      for (let i = 0; i < problemsToSync.length; i += chunkSize) {
+        const chunk = problemsToSync.slice(i, i + chunkSize);
+        const batch = writeBatch(db);
+        chunk.forEach(p => {
+          const key = getProblemKey(p);
+          batch.set(doc(db, 'problems', key), p, { merge: true });
+        });
+        await batch.commit();
+      }
+    } catch (err) {
+      console.error('Failed to sync chunk to cloud', err);
+    }
+  };
 
   useEffect(() => {
-    localStorage.setItem('mathcounts_analyzed_data', JSON.stringify(results));
-  }, [results]);
+    const fetchGlobalProblems = async () => {
+      try {
+        setLoading(true);
+        const snap = await getDocs(collection(db, 'problems'));
+
+        if (snap.empty) {
+          const saved = localStorage.getItem('mathcounts_analyzed_data');
+          if (saved) {
+            const parsed = JSON.parse(saved) as AnalyzedProblem[];
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              const dataWithYear = parsed.map(d => ({ ...d, year: d.year || '2526' }));
+              setResults(dataWithYear);
+              await pushToCloudInChunks(dataWithYear);
+              console.log("Successfully migrated local ledger to Firestore!");
+            }
+          }
+        } else {
+          const loaded: AnalyzedProblem[] = [];
+          snap.forEach(d => loaded.push({ ...d.data() } as AnalyzedProblem));
+          setResults(loaded);
+        }
+      } catch (err) {
+        console.error("Failed to fetch lab problems", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchGlobalProblems();
+  }, []);
 
   const mergeProblems = (prev: AnalyzedProblem[], incoming: AnalyzedProblem[]) => {
     const merged = new Map<string, AnalyzedProblem>();
@@ -161,7 +203,7 @@ const DataAnalyzer: React.FC = () => {
       setResults(normalized);
       return;
     }
-    const byId = new Map(results.map(r => [getProblemKey(r), r]));
+    const byId = new Map<string, AnalyzedProblem>(results.map(r => [getProblemKey(r), r]));
     const needsUpdate = normalized.some(n => {
       const prev = byId.get(getProblemKey(n));
       if (!prev) return true;
@@ -191,30 +233,30 @@ const DataAnalyzer: React.FC = () => {
   }, [results, quizNumAuto]);
 
   const categoriesList = [
-    "Algebraic", 
-    "Probability", 
-    "Proportional Reasoning", 
-    "Solid Geometry", 
-    "Coordinate Geometry", 
-    "Number Theory", 
-    "Plane Geometry", 
-    "Sequences", 
-    "Statistics", 
+    "Algebraic",
+    "Probability",
+    "Proportional Reasoning",
+    "Solid Geometry",
+    "Coordinate Geometry",
+    "Number Theory",
+    "Plane Geometry",
+    "Sequences",
+    "Statistics",
     "Misc"
   ];
 
   const getConsolidatedCategory = (cat: string) => {
     if (!cat) return "Misc";
     const norm = cat.trim().toLowerCase();
-    
+
     // Standards for Target Rounds (Priority Groups)
     if (norm.includes("algebra")) return "Algebraic";
     if (norm.includes("number theory")) return "Number Theory";
     if (norm.includes("probability") || norm.includes("counting")) return "Probability";
     if (norm.includes("geometry")) {
-        if (norm.includes("solid")) return "Solid Geometry";
-        if (norm.includes("coordinate")) return "Coordinate Geometry";
-        return "Plane Geometry"; 
+      if (norm.includes("solid")) return "Solid Geometry";
+      if (norm.includes("coordinate")) return "Coordinate Geometry";
+      return "Plane Geometry";
     }
 
     if (norm === "statistics" || norm.includes("statistics & data") || norm.includes("data analysis")) return "Statistics";
@@ -223,7 +265,7 @@ const DataAnalyzer: React.FC = () => {
 
     const miscKeywords = ["general math", "logic", "measurement", "percent", "fraction", "miscellaneous", "problem solving", "misc"];
     if (miscKeywords.some(kw => norm.includes(kw))) return "Misc";
-    
+
     return "Misc";
   };
 
@@ -252,7 +294,7 @@ const DataAnalyzer: React.FC = () => {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return;
-    const selectedFiles = Array.from(e.target.files);
+    const selectedFiles = Array.from(e.target.files) as File[];
     const nonPdf = selectedFiles.find(f => f.type !== 'application/pdf');
     if (nonPdf) {
       setError("Please upload PDF files only.");
@@ -263,7 +305,7 @@ const DataAnalyzer: React.FC = () => {
   };
 
 
-  const toBase64 = (file: File): Promise<string> => 
+  const toBase64 = (file: File): Promise<string> =>
     new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.readAsDataURL(file);
@@ -290,6 +332,7 @@ const DataAnalyzer: React.FC = () => {
         allData.push(...data.map(d => ({ ...d, year: uploadYear })));
       }
       setResults(prev => mergeProblems(prev, allData));
+      await pushToCloudInChunks(allData);
       setFiles([]);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -299,31 +342,26 @@ const DataAnalyzer: React.FC = () => {
     }
   };
 
-  const clearResults = () => {
-    setResults([]);
-    setShowClearConfirm(false);
-    setFiles([]);
-  };
-
-  const handleImportLedger = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        const importedData = JSON.parse(event.target?.result as string);
-        if (Array.isArray(importedData)) {
-          setResults(prev => mergeProblems(prev, importedData));
-          alert(`Successfully imported ${importedData.length} problems.`);
-        } else {
-          alert("Invalid file format: Data must be an array of problems.");
-        }
-      } catch (err) { 
-        alert("Failed to parse JSON file."); 
+  const clearResults = async () => {
+    try {
+      setLoading(true);
+      const snap = await getDocs(collection(db, 'problems'));
+      const chunkSize = 450;
+      for (let i = 0; i < snap.docs.length; i += chunkSize) {
+        const chunk = snap.docs.slice(i, i + chunkSize);
+        const batch = writeBatch(db);
+        chunk.forEach(d => batch.delete(d.ref));
+        await batch.commit();
       }
-    };
-    reader.readAsText(file);
-    e.target.value = ''; 
+      setResults([]);
+      setShowClearConfirm(false);
+      setFiles([]);
+    } catch (err) {
+      console.error(err);
+      alert('Failed to delete cloud problems.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const addRule = () => {
@@ -504,25 +542,25 @@ const DataAnalyzer: React.FC = () => {
       let success = false;
       const MAX_RETRIES = 1500;
       let lastTargetAttempt: QuizDraft[] = [];
-      
+
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         const attemptUsedIds = new Set<string>();
         const attemptSelection: QuizDraft[] = [];
         const shuffledGroups = [...targetCategoryGroups].sort(() => Math.random() - 0.5);
         const shuffledSlots = [...targetDifficultySlots].sort(() => Math.random() - 0.5);
-        
+
         let attemptFailed = false;
         for (let i = 0; i < 4; i++) {
           const currentGroup = shuffledGroups[i];
           const currentSlot = shuffledSlots[i];
-          
-          const pool = available.filter(r => 
+
+          const pool = available.filter(r =>
             !attemptUsedIds.has(getProblemKey(r)) &&
             getConsolidatedProblemSet(r.problemSet) === 'Workouts' &&
             currentGroup.includes(getConsolidatedCategory(r.category)) &&
             currentSlot.includes(String(r.difficulty))
           );
-          
+
           if (pool.length > 0) {
             const picked = pool[Math.floor(Math.random() * pool.length)];
             attemptUsedIds.add(getProblemKey(picked));
@@ -532,7 +570,7 @@ const DataAnalyzer: React.FC = () => {
             break;
           }
         }
-        
+
         if (!attemptFailed && attemptSelection.length === 4) {
           attemptSelection.forEach(d => {
             newDraft.push(d);
@@ -572,32 +610,32 @@ const DataAnalyzer: React.FC = () => {
     rules
       .filter(r => r.id !== 'tq-atomic' && (!isStrictTargetRequested || r.type !== 'Target') && (!isStrictSprintRequested || r.type !== 'Sprint'))
       .forEach(rule => {
-      let pool = available.filter(r => !usedIds.has(getProblemKey(r)));
-      
-      if (rule.type === 'Sprint') {
-        pool = pool.filter(r => getConsolidatedProblemSet(r.problemSet) !== 'Workouts');
-      } else if (rule.type === 'Target') {
-        pool = pool.filter(r => getConsolidatedProblemSet(r.problemSet) === 'Workouts');
-      }
+        let pool = available.filter(r => !usedIds.has(getProblemKey(r)));
 
-      if (rule.categories.length > 0 && rule.categories[0] !== 'STRICT_MC_COMPLIANT') {
-        pool = pool.filter(r => rule.categories.includes(getConsolidatedCategory(r.category)));
-      }
+        if (rule.type === 'Sprint') {
+          pool = pool.filter(r => getConsolidatedProblemSet(r.problemSet) !== 'Workouts');
+        } else if (rule.type === 'Target') {
+          pool = pool.filter(r => getConsolidatedProblemSet(r.problemSet) === 'Workouts');
+        }
 
-      if (rule.difficulties.length > 0) {
-        pool = pool.filter(r => rule.difficulties.includes(r.difficulty));
-      }
+        if (rule.categories.length > 0 && rule.categories[0] !== 'STRICT_MC_COMPLIANT') {
+          pool = pool.filter(r => rule.categories.includes(getConsolidatedCategory(r.category)));
+        }
 
-      if (rule.problemSets.length > 0) {
-        pool = pool.filter(r => rule.problemSets.includes(getConsolidatedProblemSet(r.problemSet)));
-      }
-      
-      const selection = pool.sort(() => 0.5 - Math.random()).slice(0, rule.count);
-      selection.forEach(p => {
-        newDraft.push({ problem: p, ruleId: rule.id, type: rule.type, index: 0 });
-        usedIds.add(getProblemKey(p));
+        if (rule.difficulties.length > 0) {
+          pool = pool.filter(r => rule.difficulties.includes(r.difficulty));
+        }
+
+        if (rule.problemSets.length > 0) {
+          pool = pool.filter(r => rule.problemSets.includes(getConsolidatedProblemSet(r.problemSet)));
+        }
+
+        const selection = pool.sort(() => 0.5 - Math.random()).slice(0, rule.count);
+        selection.forEach(p => {
+          newDraft.push({ problem: p, ruleId: rule.id, type: rule.type, index: 0 });
+          usedIds.add(getProblemKey(p));
+        });
       });
-    });
 
     const fill = (type: 'Sprint' | 'Target', target: number) => {
       if (type === 'Sprint' && isStrictSprintRequested) return;
@@ -670,7 +708,7 @@ const DataAnalyzer: React.FC = () => {
     const sprintGroup = newDraft
       .filter(d => d.type === 'Sprint')
       .sort((a, b) => (parseInt(a.problem.difficulty) || 0) - (parseInt(b.problem.difficulty) || 0));
-    
+
     const targetGroup = newDraft
       .filter(d => d.type === 'Target')
       .sort((a, b) => (parseInt(a.problem.difficulty) || 0) - (parseInt(b.problem.difficulty) || 0));
@@ -689,7 +727,7 @@ const DataAnalyzer: React.FC = () => {
     if (!draftItem) return;
     const usedInDraft = new Set(draft.map(d => getProblemKey(d.problem)));
     let pool = results.filter(r => !r.isUsed && !usedInDraft.has(getProblemKey(r)));
-    
+
     if (draftItem.type === 'Sprint') {
       pool = pool.filter(r => getConsolidatedProblemSet(r.problemSet) !== 'Workouts');
     } else {
@@ -721,8 +759,8 @@ const DataAnalyzer: React.FC = () => {
       } else if (rule?.id === 'tq-atomic') {
         const cat = getConsolidatedCategory(draftItem.problem.category);
         const diff = draftItem.problem.difficulty;
-        pool = pool.filter(r => 
-          getConsolidatedCategory(r.category) === cat && 
+        pool = pool.filter(r =>
+          getConsolidatedCategory(r.category) === cat &&
           r.difficulty === diff &&
           getConsolidatedProblemSet(r.problemSet) === 'Workouts'
         );
@@ -746,7 +784,7 @@ const DataAnalyzer: React.FC = () => {
       Other: 0
     };
     const sprintDiffs: Record<string, number> = {};
-      let sprintWorkoutOk = true;
+    let sprintWorkoutOk = true;
 
     items.forEach(d => {
       const cat = getConsolidatedCategory(d.problem.category);
@@ -880,7 +918,7 @@ const DataAnalyzer: React.FC = () => {
     return `Available non-Workouts + Workouts(L2/L3): Alg ${counts.Algebraic}, Prob ${counts.Probability}, NumTheory ${counts['Number Theory']}, Geometry ${counts.Geometry}, Other ${counts.Other} | L1-3 ${low}, L4 ${lvl4}, L5 ${lvl5}, L6 ${lvl6}, L6/7 ${lvl67}`;
   };
 
-  const finalizeQuiz = () => {
+  const finalizeQuiz = async () => {
     if (draft.length === 0) return;
     const sprintDraft = draft.filter(d => d.type === 'Sprint');
     const targetDraft = draft.filter(d => d.type === 'Target');
@@ -899,16 +937,45 @@ const DataAnalyzer: React.FC = () => {
       }
     }
 
-    const draftMap = new Map<string, QuizDraft>(draft.map(d => [getProblemKey(d.problem), d]));
-    setResults(prev => prev.map(p => {
-      const draftItem = draftMap.get(getProblemKey(p));
-      if (draftItem) return { ...p, isUsed: true, quiz: `Quiz ${quizNum}`, quizNumber: `${draftItem.type[0].toLowerCase()}${draftItem.index}` };
-      return p;
-    }));
-    setDraft([]);
-    setRules([]);
-    setView('data');
-    alert(`Successfully finalized Quiz ${quizNum}.`);
+    setLoading(true);
+    try {
+      const draftMap = new Map<string, QuizDraft>(draft.map(d => [getProblemKey(d.problem), d]));
+      const updatedProblems: AnalyzedProblem[] = [];
+
+      setResults(prev => prev.map(p => {
+        const draftItem = draftMap.get(getProblemKey(p));
+        if (draftItem) {
+          const updated = { ...p, isUsed: true, quiz: `Quiz ${quizNum}`, quizNumber: `${draftItem.type[0].toLowerCase()}${draftItem.index}` };
+          updatedProblems.push(updated);
+          return updated;
+        }
+        return p;
+      }));
+
+      if (updatedProblems.length > 0) {
+        const batch = writeBatch(db);
+        updatedProblems.forEach(p => {
+          const key = getProblemKey(p);
+          // merge: true natively updates only the mutated fields on Google Cloud
+          batch.set(doc(db, 'problems', key), {
+            isUsed: p.isUsed,
+            quiz: p.quiz,
+            quizNumber: p.quizNumber
+          }, { merge: true });
+        });
+        await batch.commit();
+      }
+
+      setDraft([]);
+      setRules([]);
+      setView('data');
+      alert(`Successfully finalized Quiz ${quizNum} globally!`);
+    } catch (err) {
+      console.error("Failed to sync generated quiz to Firestore", err);
+      alert("Failed to sync generated quiz to Google Cloud.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const toggleMultiSelect = (item: string, current: string[], setter: (val: string[]) => void) => {
@@ -916,7 +983,7 @@ const DataAnalyzer: React.FC = () => {
     else setter([...current, item]);
   };
 
-  const filteredResults = results.filter(r => 
+  const filteredResults = results.filter(r =>
     r.problemId.toLowerCase().includes(searchTerm.toLowerCase()) ||
     r.problemSet.toLowerCase().includes(searchTerm.toLowerCase()) ||
     r.category.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -934,17 +1001,6 @@ const DataAnalyzer: React.FC = () => {
     });
     return copy;
   }, [filteredResults]);
-
-  const exportGridData = () => {
-    if (sortedResults.length === 0) return;
-    const blob = new Blob([JSON.stringify(sortedResults, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `mathcounts_grid_${new Date().toISOString().split('T')[0]}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
 
   const draftSummary = useMemo(() => {
     if (draft.length === 0) return null;
@@ -974,7 +1030,6 @@ const DataAnalyzer: React.FC = () => {
 
   return (
     <div className="max-w-6xl mx-auto space-y-10 animate-in fade-in duration-500 pb-32">
-      <input type="file" ref={importInputRef} accept=".json" className="hidden" onChange={handleImportLedger} />
       <input type="file" ref={uploadInputRef} multiple accept="application/pdf" className="hidden" onChange={handleFileChange} />
 
       <header className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-6">
@@ -997,14 +1052,14 @@ const DataAnalyzer: React.FC = () => {
 
       {view === 'data' ? (
         <>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="max-w-3xl mx-auto">
             <section className={`relative group border-4 border-dashed rounded-[2.5rem] p-10 text-center bg-white ${files.length > 0 ? 'border-emerald-200 bg-emerald-50/20' : 'border-slate-200 hover:border-indigo-400'}`}>
               <div className="flex flex-col items-center">
                 <CloudArrowUpIcon className={`w-12 h-12 mb-4 ${files.length > 0 ? 'text-emerald-500' : 'text-slate-300'}`} />
                 <h3 className="font-bold text-slate-800">
                   {files.length > 0 ? `${files.length} PDF${files.length > 1 ? 's' : ''} selected` : 'Drop Handbook PDFs'}
                 </h3>
-                <p className="text-xs text-slate-400 mb-6 italic">Uses AI to map CCSS and Categories</p>
+                <p className="text-xs text-slate-400 mb-6 italic">Uses AI to natively extract questions and push them safely to Google Cloud</p>
                 <div className="flex items-center gap-3 mb-4">
                   <label className="text-[10px] font-black uppercase text-slate-400">Year</label>
                   <input
@@ -1025,12 +1080,6 @@ const DataAnalyzer: React.FC = () => {
                 </div>
               </div>
             </section>
-            <section className="border-4 border-dashed rounded-[2.5rem] border-slate-100 p-10 text-center bg-white flex flex-col items-center justify-center">
-              <DocumentArrowUpIcon className="w-12 h-12 mb-4 text-slate-300" />
-              <h3 className="font-bold text-slate-800">Quick Restore</h3>
-              <p className="text-xs text-slate-400 mb-6 italic">Skip the AI wait by loading a saved JSON ledger</p>
-              <button onClick={() => importInputRef.current?.click()} className="px-8 py-3 bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-xl font-bold transition-all">Upload JSON</button>
-            </section>
           </div>
 
           {results.length > 0 && (
@@ -1041,7 +1090,6 @@ const DataAnalyzer: React.FC = () => {
                   <input type="text" placeholder="Filter by ID, Set, Category..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full bg-white border border-slate-200 rounded-2xl pl-16 pr-8 py-4 outline-none focus:ring-4 focus:ring-indigo-500/10 font-medium text-slate-700 shadow-sm" />
                 </div>
                 <div className="flex items-center gap-4">
-                  <button onClick={exportGridData} className="text-indigo-600 text-sm font-bold flex items-center gap-2 hover:underline"><ArrowDownTrayIcon className="w-4 h-4" /> Export JSON</button>
                   <button onClick={() => setShowClearConfirm(true)} className="text-red-500 text-sm font-bold flex items-center gap-2 hover:underline"><TrashIcon className="w-4 h-4" /> Clear All</button>
                 </div>
               </div>
@@ -1170,7 +1218,7 @@ const DataAnalyzer: React.FC = () => {
                 <button onClick={generateDraft} className="w-full py-4 bg-indigo-600 text-white font-black rounded-2xl shadow-xl hover:bg-indigo-700 transition-all flex items-center justify-center gap-2"><SparklesIcon className="w-5 h-5" /> Generate Draft</button>
               </div>
             </section>
-            
+
             <section className="lg:col-span-2 space-y-8">
               <div className="flex justify-between items-center">
                 <h3 className="text-2xl font-black flex items-center gap-3"><BeakerIcon className="w-8 h-8 text-indigo-600" /> Proposed Draft</h3>
@@ -1327,7 +1375,7 @@ const DataAnalyzer: React.FC = () => {
               </div>
               <div className="space-y-3">
                 <label className="text-[10px] font-black uppercase text-slate-400">Difficulties</label>
-                <div className="flex flex-wrap gap-2 p-2 bg-slate-50 rounded-xl border">{['1','2','3','4','5','6','7','8','9','10'].map(d => (<label key={d} className="flex items-center gap-2 p-2 rounded-lg hover:bg-white cursor-pointer"><input type="checkbox" checked={newRuleDifficulties.includes(d)} onChange={() => toggleMultiSelect(d, newRuleDifficulties, setNewRuleDifficulties)} className="rounded text-indigo-600" /><span className="text-xs font-bold text-slate-500">{d}</span></label>))}</div>
+                <div className="flex flex-wrap gap-2 p-2 bg-slate-50 rounded-xl border">{['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'].map(d => (<label key={d} className="flex items-center gap-2 p-2 rounded-lg hover:bg-white cursor-pointer"><input type="checkbox" checked={newRuleDifficulties.includes(d)} onChange={() => toggleMultiSelect(d, newRuleDifficulties, setNewRuleDifficulties)} className="rounded text-indigo-600" /><span className="text-xs font-bold text-slate-500">{d}</span></label>))}</div>
               </div>
               <div className="space-y-2"><label className="text-[10px] font-black uppercase text-slate-400">Quantity</label><input type="number" value={newRuleCount} onChange={e => setNewRuleCount(parseInt(e.target.value) || 1)} className="w-full bg-slate-50 border rounded-xl p-4 font-bold text-sm outline-none" /></div>
               <div className="flex gap-4 pt-4"><button onClick={() => setShowRuleModal(false)} className="flex-1 py-4 font-bold text-slate-400">Cancel</button><button onClick={addRule} className="flex-2 bg-indigo-600 text-white font-black py-4 rounded-2xl shadow-lg">Save Rule</button></div>
@@ -1340,7 +1388,7 @@ const DataAnalyzer: React.FC = () => {
         <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
           <div className="bg-white w-full max-sm rounded-[2rem] shadow-2xl p-10 text-center">
             <h3 className="text-xl font-black text-slate-900 mb-2">Wipe Ledger?</h3>
-            <p className="text-slate-500 text-sm mb-8">This will delete all analyzed problems from local storage.</p>
+            <p className="text-slate-500 text-sm mb-8">This will delete all analyzed problems from the Google Cloud collection permanently across all devices.</p>
             <div className="flex gap-3"><button onClick={() => setShowClearConfirm(false)} className="flex-1 py-4 font-bold text-slate-500">Cancel</button><button onClick={clearResults} className="flex-1 py-4 font-black text-white bg-red-500 rounded-2xl">Delete All</button></div>
           </div>
         </div>

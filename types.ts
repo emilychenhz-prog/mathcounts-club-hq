@@ -1,5 +1,5 @@
-
 export enum UserRole {
+  ADMIN = 'ADMIN',
   COACH = 'COACH',
   STUDENT = 'STUDENT',
   GUEST = 'GUEST'
@@ -69,8 +69,6 @@ export interface StudentStats {
   gender: string;
   tryoutScore: number;
   problemsSolved: number;
-  averageSprintScore: number;
-  averageTargetScore: number;
   badges: Badge[];
   // Dynamic scores indexed by AssessmentColumn.id
   dynamicScores?: Record<string, number>;
